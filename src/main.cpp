@@ -1,5 +1,6 @@
 #include "BinaryAnalyzer.hpp"
 #include "CacheManager.hpp"
+#include "Logger.hpp"
 #include "MemoryVerifier.hpp"
 #include "ResultDumper.hpp"
 #include "RuntimeResolver.hpp"
@@ -46,26 +47,36 @@ int main(int argc, char* argv[]) {
 
     const std::filesystem::path cachePath = (argc >= 3) ? argv[2] : std::filesystem::path("fastflag_cache.txt");
 
+    setLogLevel(LogLevel::Debug);
+    log(LogLevel::Info, "Starting scan", executablePath.string());
+    log(LogLevel::Debug, "Cache file", cachePath.string());
+
     BinaryAnalyzer analyzer(executablePath);
     if (!analyzer.load()) {
-        std::cerr << "Failed to load binary: " << executablePath << std::endl;
+        log(LogLevel::Error, "Failed to load binary", executablePath.string());
         return 1;
     }
 
     const auto prefixes = defaultPrefixes();
+    log(LogLevel::Debug, "Using prefixes", "FFlag DFFlag SFFlag FInt DFInt FString FLog DFString");
     CacheManager cacheManager(cachePath);
     const std::string version = analyzer.versionString().empty() ? "unknown" : analyzer.versionString();
 
     RuntimeResolver runtimeResolver;
     const std::wstring processName = L"RobloxPlayerBeta.exe";
+    log(LogLevel::Debug, "Attempting to attach to process", "RobloxPlayerBeta.exe");
     const bool attached = runtimeResolver.attachToProcess(processName);
 
     std::optional<ModuleInfo> moduleInfo;
     if (attached) {
         moduleInfo = runtimeResolver.findModule(processName);
         if (!moduleInfo) {
-            std::cerr << "Warning: attached to process but could not locate module " << std::string(processName.begin(), processName.end()) << std::endl;
+            log(LogLevel::Warning, "Attached but could not locate module", "RobloxPlayerBeta.exe");
+        } else {
+            log(LogLevel::Info, "Found module base", std::to_string(moduleInfo->base));
         }
+    } else {
+        log(LogLevel::Warning, "Could not attach to Roblox process");
     }
 
     std::optional<CacheRecord> cached = cacheManager.loadCache(version);
@@ -97,25 +108,31 @@ int main(int argc, char* argv[]) {
     };
 
     if (cached.has_value()) {
-        std::cout << "Found cache for version: " << cached->version << "\n";
+        log(LogLevel::Info, "Found cache for version", cached->version);
         auto candidates = analyzer.buildRegistryCandidates(prefixes);
         auto it = std::find_if(candidates.begin(), candidates.end(), [&](const ScanCandidate& item) {
             return item.rva == cached->rva;
         });
         if (it != candidates.end()) {
-            std::cout << "Verifying cached candidate...\n";
+            log(LogLevel::Info, "Verifying cached candidate");
             auto verified = validateCandidate(*it);
             if (verified) {
                 selectedCandidate = verified;
+            } else {
+                log(LogLevel::Warning, "Cached candidate verification failed");
             }
+        } else {
+            log(LogLevel::Warning, "Cached candidate missing from current scan results");
         }
     }
 
     if (!selectedCandidate.has_value()) {
-        std::cout << "Scanning binary for FastFlag registry candidates...\n";
+        log(LogLevel::Info, "Scanning binary for FastFlag registry candidates...");
         auto candidates = analyzer.buildRegistryCandidates(prefixes);
+        log(LogLevel::Debug, "Candidate count", std::to_string(candidates.size()));
         for (auto& candidate : candidates) {
             auto verified = validateCandidate(candidate);
+            log(LogLevel::Debug, "Candidate", std::to_string(candidate.rva), "confidence", std::to_string(candidate.confidence));
             if (verified) {
                 selectedCandidate = verified;
                 break;
@@ -124,7 +141,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (!selectedCandidate.has_value()) {
-        std::cerr << "No FastFlag registry candidate could be verified." << std::endl;
+        log(LogLevel::Error, "No FastFlag registry candidate could be verified.");
         return 2;
     }
 
@@ -136,7 +153,9 @@ int main(int argc, char* argv[]) {
     record.strategy = selectedCandidate->strategy;
     record.confidence = selectedCandidate->confidence;
     if (!cacheManager.saveCache(record)) {
-        std::cerr << "Warning: failed to save cache" << std::endl;
+        log(LogLevel::Warning, "Failed to save cache", cachePath.string());
+    } else {
+        log(LogLevel::Info, "Cache saved for version", record.version);
     }
 
     return 0;
